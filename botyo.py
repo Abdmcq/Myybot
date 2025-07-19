@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # --- Bot Configuration (Embedded for personal use as requested) ---
 TELEGRAM_BOT_TOKEN = "7892395794:AAEUNB1UygFFcCbl7vxoEvH_DFGhjkfOlg8" # استبدل بالتوكن الخاص بك
-GEMINI_API_KEY = "AIzaSyCtGuhftV0VQCWZpYS3KTMWHoLg__qpO3g" # استبدل بمفتاحك
+GEMINI_API_KEY = "AIzaSyCtGuhftV0VQCWZpYSKTMWHoLg__qpO3g" # استبدل بمفتاحك
 OWNER_ID = 1749717270  # <--- !!! استبدل هذا بمعرف مستخدم تيليجرام الرقمي الخاص بك !!!
 OWNER_USERNAME = "ll7ddd" # استبدل باسم المستخدم الخاص بك في تيليجرام
 BOT_PROGRAMMER_NAME = "عبدالرحمن حسن"
@@ -39,12 +39,9 @@ PERSISTENCE_FILE = "bot_data_persistence.pkl"
 ASK_NUM_QUESTIONS_FOR_EXTRACTION = range(1)
 MCQS_FILENAME = "latest_mcqs.json"
 
-# Webhook configuration for Render (these still need to be environment variables or derived)
-# Render provides a PORT environment variable automatically
+# Webhook configuration for Render
 PORT = int(os.environ.get("PORT", 8000))
-WEBHOOK_PATH = "/telegram-webhook" # A specific path for your webhook
-# WEBHOOK_URL will be provided by Render or set manually in environment variables
-# It's crucial for Render to know its own public URL
+WEBHOOK_PATH = "/telegram-webhook"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # --- Helper Functions ---
@@ -452,17 +449,30 @@ def run_health_check_server():
 async def main() -> None:
     """Main function to run the bot."""
     # Create persistence object
+    # Initialize PicklePersistence outside Application.builder() to avoid the Updater error
     persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
 
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).persistence(persistence).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Manually load persistence data if needed, or let handlers manage it
+    # For webhooks, persistence might be tricky as the process can restart frequently.
+    # If you need robust persistence, consider a database. For simple use, this might work.
+    application.persistence = persistence
+
 
     # Set webhook
     if WEBHOOK_URL:
-        await application.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
-        logger.info(f"Webhook set to: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        # Ensure the webhook is set correctly. This call needs to happen only once or on deploy.
+        # It's better to set it outside the main loop if possible, or ensure it's idempotent.
+        try:
+            await application.bot.set_webhook(url=f"{WEBHOOK_URL}{WEBHOOK_PATH}")
+            logger.info(f"Webhook set to: {WEBHOOK_URL}{WEBHOOK_PATH}")
+        except TelegramError as e:
+            logger.error(f"Failed to set webhook: {e}")
+            # If webhook fails, the bot won't receive updates, so exit or handle appropriately
+            exit(1)
     else:
-        logger.warning("WEBHOOK_URL environment variable not set. Webhook might not be configured correctly. "
-                       "Please set WEBHOOK_URL in Render environment variables after first deploy.")
+        logger.error("WEBHOOK_URL environment variable not set. Webhook cannot be configured. Exiting.")
+        exit(1) # Cannot run without WEBHOOK_URL in Render environment
 
     extraction_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Document.PDF, handle_pdf_for_extraction)],
@@ -483,19 +493,23 @@ async def main() -> None:
     logger.info(f"Bot started. Owner ID: {OWNER_ID}. MCQs will be saved to {MCQS_FILENAME}. Persistence file: {PERSISTENCE_FILE}.")
 
     # Start the webhook server
+    # The webhook server is now handled by application.run_webhook
+    # It will manage the incoming requests from Telegram
     webserver = application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=WEBHOOK_PATH,
-        webhook_url=f"{WEBHOOK_URL}{WEBHOOK_PATH}" if WEBHOOK_URL else None # Use WEBHOOK_URL if available
+        webhook_url=f"{WEBHOOK_URL}{WEBHOOK_PATH}" # This is for internal use by PTB
     )
 
     # Run a separate thread for the simple health check server
+    # This is crucial for Render to know your app is alive
     import threading
     health_check_thread = threading.Thread(target=run_health_check_server)
     health_check_thread.daemon = True
     health_check_thread.start()
 
+    # Await the webserver to keep the main asyncio loop running
     await webserver
 
 if __name__ == "__main__":
